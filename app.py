@@ -63,6 +63,9 @@ def build_base_graph(df, dist_threshold=100):
     return G_base
 
 G_base = build_base_graph(df)
+
+tab1, tab2 = st.tabs(["🌐 Network Graph", "🗺️ Maps & Trends"])
+
 # ======================
 # TAB 1: NETWORK GRAPH
 # ======================
