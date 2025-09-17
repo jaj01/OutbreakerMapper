@@ -77,7 +77,6 @@ if weeks:
 
     # Create PyVis network
     net = Network(height="700px", width="100%", bgcolor="#222222", font_color="white")
-
     for n, data in G.nodes(data=True):
         net.add_node(
             n,
@@ -90,11 +89,11 @@ if weeks:
     for u, v, data in G.edges(data=True):
         net.add_edge(u, v, value=data['weight'])
 
-    net.save_graph("network_temp.html")
+# --- Generate HTML directly (no file saving) ---
+    html_str = net.generate_html()
 
-    # Show in Streamlit
-    HtmlFile = open("network_temp.html", "r", encoding="utf-8")
-    components.html(HtmlFile.read(), height=750)
+# Show in Streamlit
+    components.html(html_str, height=750, scrolling=True)
 
 else:
     st.warning("No weeks available in dataset.")
