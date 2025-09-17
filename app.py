@@ -24,6 +24,24 @@ def load_data():
     return df
 
 df = load_data()
+# --- Sidebar filters ---
+st.sidebar.header("⚙️ Filters")
+
+# Disease filter
+diseases = ["All"] + sorted(df["disease_grouped"].dropna().unique().tolist())
+selected_disease = st.sidebar.selectbox("Select Disease", diseases)
+
+# State filter
+states = ["All"] + sorted(df["state"].dropna().unique().tolist())
+selected_states = st.sidebar.multiselect("Select States", states, default=["All"])
+
+# Apply filters
+filtered_df = df.copy()
+if selected_disease != "All":
+    filtered_df = filtered_df[filtered_df["disease_grouped"] == selected_disease]
+
+if "All" not in selected_states:
+    filtered_df = filtered_df[filtered_df["state"].isin(selected_states)]
 
 # --- Base Graph (neighbors by distance) ---
 @st.cache_data
@@ -47,30 +65,37 @@ def build_base_graph(df, dist_threshold=100):
 G_base = build_base_graph(df)
 
 # --- Sidebar filters ---
+# --- Sidebar filters ---
 st.sidebar.header("⚙️ Filters")
+
+# Disease filter
 diseases = ["All"] + sorted(df["disease_grouped"].dropna().unique().tolist())
 selected_disease = st.sidebar.selectbox("Select Disease", diseases)
 
-# Filter dataset
+# State filter
+states = ["All"] + sorted(df["state"].dropna().unique().tolist())
+selected_states = st.sidebar.multiselect("Select States", states, default=["All"])
+
+# Apply filters
+filtered_df = df.copy()
 if selected_disease != "All":
-    df = df[df["disease_grouped"] == selected_disease]
+    filtered_df = filtered_df[filtered_df["disease_grouped"] == selected_disease]
 
-# --- Tabs ---
-tab1, tab2 = st.tabs(["🌐 Network Graph", "🗺️ Maps & Trends"])
-
+if "All" not in selected_states:
+    filtered_df = filtered_df[filtered_df["state"].isin(selected_states)]
 # ======================
 # TAB 1: NETWORK GRAPH
 # ======================
 with tab1:
     st.header("🌐 Temporal Disease Spread Network")
 
-    weeks = sorted(df["year_week"].dropna().unique())
+    weeks = sorted(filtered_df["year_week"].dropna().unique())
     if weeks:
         week_idx = st.slider("Select Week", 0, len(weeks)-1, 0, key="week_slider")
         selected_week = weeks[week_idx]
         st.subheader(f"📅 Network for: **{selected_week}** | Disease: **{selected_disease}**")
 
-        week_cases = df[df["year_week"] == selected_week].groupby("district")["cases"].sum().to_dict()
+        week_cases = filtered_df[filtered_df["year_week"] == selected_week].groupby("district")["cases"].sum().to_dict()
 
         G = G_base.copy()
         for n in G.nodes:
@@ -105,7 +130,9 @@ with tab2:
 
     # --- Bubble Map ---
     st.subheader(f"District Bubble Map ({selected_disease})")
-    district_cases = df.groupby(["state", "district", "latitude", "longitude"])["cases"].sum().reset_index()
+   district_cases = filtered_df.groupby(["state", "district", "latitude", "longitude"])["cases"].sum().reset_index()
+
+
 
     m = folium.Map(location=[20.5937, 78.9629], zoom_start=5, tiles="CartoDB positron")
 
@@ -124,8 +151,8 @@ with tab2:
 
     # --- Trends ---
     st.subheader(f"Top District Trends ({selected_disease})")
-    top_districts = df.groupby("district")["cases"].sum().nlargest(5).index.tolist()
-    trend_data = df[df["district"].isin(top_districts)]
+    top_districts = filtered_df.groupby("district")["cases"].sum().nlargest(5).index.tolist()
+    trend_data = filtered_df[filtered_df["district"].isin(top_districts)]
 
     if not trend_data.empty:
         chart = (
