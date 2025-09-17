@@ -130,7 +130,7 @@ with tab2:
 
     # --- Bubble Map ---
     st.subheader(f"District Bubble Map ({selected_disease})")
-   district_cases = filtered_df.groupby(["state", "district", "latitude", "longitude"])["cases"].sum().reset_index()
+    district_cases = filtered_df.groupby(["state", "district", "latitude", "longitude"])["cases"].sum().reset_index()
 
 
 
