@@ -64,18 +64,6 @@ def build_base_graph(df, dist_threshold=100):
 
 G_base = build_base_graph(df)
 
-# --- Sidebar filters ---
-# --- Sidebar filters ---
-st.sidebar.header("⚙️ Filters")
-
-# Disease filter
-diseases = ["All"] + sorted(df["disease_grouped"].dropna().unique().tolist())
-selected_disease = st.sidebar.selectbox("Select Disease", diseases)
-
-# State filter
-states = ["All"] + sorted(df["state"].dropna().unique().tolist())
-selected_states = st.sidebar.multiselect("Select States", states, default=["All"])
-
 # Apply filters
 filtered_df = df.copy()
 if selected_disease != "All":
