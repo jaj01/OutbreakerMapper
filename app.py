@@ -63,14 +63,6 @@ def build_base_graph(df, dist_threshold=100):
     return G_base
 
 G_base = build_base_graph(df)
-
-# Apply filters
-filtered_df = df.copy()
-if selected_disease != "All":
-    filtered_df = filtered_df[filtered_df["disease_grouped"] == selected_disease]
-
-if "All" not in selected_states:
-    filtered_df = filtered_df[filtered_df["state"].isin(selected_states)]
 # ======================
 # TAB 1: NETWORK GRAPH
 # ======================
