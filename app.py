@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
-import geopandas as gpd
 import matplotlib.pyplot as plt
 import altair as alt
 import networkx as nx
 from geopy.distance import geodesic
 from pyvis.network import Network
 import streamlit.components.v1 as components
+import folium
+from streamlit_folium import st_folium
 
 st.set_page_config(page_title="OutbreakMapper", layout="wide")
 
@@ -50,12 +51,12 @@ st.sidebar.header("⚙️ Filters")
 diseases = ["All"] + sorted(df["disease_grouped"].dropna().unique().tolist())
 selected_disease = st.sidebar.selectbox("Select Disease", diseases)
 
-# Filter dataset by disease
+# Filter dataset
 if selected_disease != "All":
     df = df[df["disease_grouped"] == selected_disease]
 
 # --- Tabs ---
-tab1, tab2 = st.tabs(["🌐 Network Graph", "🗺️ Heatmaps & Trends"])
+tab1, tab2 = st.tabs(["🌐 Network Graph", "🗺️ Maps & Trends"])
 
 # ======================
 # TAB 1: NETWORK GRAPH
@@ -69,10 +70,8 @@ with tab1:
         selected_week = weeks[week_idx]
         st.subheader(f"📅 Network for: **{selected_week}** | Disease: **{selected_disease}**")
 
-        # Cases for selected week
         week_cases = df[df["year_week"] == selected_week].groupby("district")["cases"].sum().to_dict()
 
-        # Copy graph
         G = G_base.copy()
         for n in G.nodes:
             G.nodes[n]["cases"] = week_cases.get(n, 0)
@@ -81,7 +80,6 @@ with tab1:
             cases_v = G.nodes[v]["cases"]
             data["weight"] = 1 / (1 + abs(cases_u - cases_v))
 
-        # Build PyVis
         net = Network(height="700px", width="100%", bgcolor="#222222", font_color="white")
         for n, data in G.nodes(data=True):
             net.add_node(
@@ -100,31 +98,32 @@ with tab1:
         st.warning("No weeks available in dataset.")
 
 # ======================
-# TAB 2: HEATMAPS & TRENDS
+# TAB 2: MAPS & TRENDS
 # ======================
 with tab2:
-    st.header("🗺️ State & District Analysis")
+    st.header("🗺️ District Bubble Maps & Trends")
 
-    # --- State-wise Heatmap ---
-    st.subheader(f"State-wise Total Cases ({selected_disease})")
-    state_cases = df.groupby("state")["cases"].sum().reset_index()
+    # --- Bubble Map ---
+    st.subheader(f"District Bubble Map ({selected_disease})")
+    district_cases = df.groupby(["state", "district", "latitude", "longitude"])["cases"].sum().reset_index()
 
-    try:
-        india_states = gpd.read_file("india_maps/maps-master/States/IndiaState.shp")
-        india_states["state"] = india_states["state"].astype(str).str.strip().str.title()
-        state_cases["state"] = state_cases["state"].astype(str).str.strip().str.title()
-        india_states = india_states.merge(state_cases, on="state", how="left").fillna(0)
+    m = folium.Map(location=[20.5937, 78.9629], zoom_start=5, tiles="CartoDB positron")
 
-        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
-        india_states.plot(column="cases", cmap="Reds", legend=True, ax=ax, edgecolor="black")
-        ax.set_title(f"State-wise Outbreak Heatmap ({selected_disease})", fontsize=16)
-        ax.axis("off")
-        st.pyplot(fig)
-    except Exception as e:
-        st.warning("Could not load shapefile. Please upload India state boundaries.")
+    for _, row in district_cases.iterrows():
+        if pd.notna(row["latitude"]) and pd.notna(row["longitude"]):
+            folium.CircleMarker(
+                location=[row["latitude"], row["longitude"]],
+                radius=max(3, row["cases"]/20),
+                popup=f"{row['district']}, {row['state']}<br>Cases: {row['cases']}",
+                color="red",
+                fill=True,
+                fill_opacity=0.6
+            ).add_to(m)
 
-    # --- District-wise Trends ---
-    st.subheader(f"Top Districts by Cases ({selected_disease})")
+    st_folium(m, width=900, height=600)
+
+    # --- Trends ---
+    st.subheader(f"Top District Trends ({selected_disease})")
     top_districts = df.groupby("district")["cases"].sum().nlargest(5).index.tolist()
     trend_data = df[df["district"].isin(top_districts)]
 
