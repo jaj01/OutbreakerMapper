@@ -241,6 +241,20 @@ with tab3:
         sel_week = weeks_p[sel_week_idx]
         st.subheader(f"Predictions for: {sel_week}")
 
+        if weeks_p:
+            sel_week_idx = st.slider(
+                "Select week (predictions)",
+                0,
+                len(weeks_p)-1,
+                len(weeks_p)-1,
+                key="week_slider_pred"
+            )
+            sel_week = weeks_p[sel_week_idx]
+            st.subheader(f"Predictions for week: {sel_week}")
+        else:
+            st.warning("⚠️ No prediction weeks available. Please check predictions.csv.")
+            sel_week = None
+
         # filter preds
         df_week = preds_df[preds_df['year_week'] == sel_week].copy()
 
