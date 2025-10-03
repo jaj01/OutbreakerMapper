@@ -52,7 +52,7 @@ nodes_df = load_nodes()
 
 # --- Load predictions (if exist) ---
 @st.cache_data
-def load_predictions(path="outputs/predictions.csv"):
+def load_predictions(path="predictions.csv"):
     if os.path.exists(path):
         preds = pd.read_csv(path)
         # Expect columns: time_batch_idx, node_global_idx, state, district, y_true, y_pred, year_week (optional)
