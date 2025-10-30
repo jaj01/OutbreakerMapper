@@ -309,6 +309,69 @@ with tab3:
             else:
                 # merge centroids if nodes_df present
                 if not nodes_df.empty:
+                    if not isinstance(df_week, pd.DataFrame):
+                        st.error("Internal error: df_week must be a DataFrame.")
+                    else:
+                        # Ensure 'y_true' column exists — if not create from 'y_true' in preds or default 0
+                        if 'y_true' not in df_week.columns:
+                            # Some prediction CSVs store ground truth under different names; try a few fallbacks
+                            fallbacks = ['true', 'label', 'actual', 'y_true_values']
+                            found = False
+                            for f in fallbacks:
+                                if f in df_week.columns:
+                                    df_week['y_true'] = df_week[f]
+                                    found = True
+                                    break
+                            if not found:
+                                df_week['y_true'] = 0.0
+                    
+                        # Ensure 'y_pred' column exists
+                        if 'y_pred' not in df_week.columns:
+                            fallbacks = ['pred', 'prediction', 'y_pred_values', 'yhat']
+                            found = False
+                            for f in fallbacks:
+                                if f in df_week.columns:
+                                    df_week['y_pred'] = df_week[f]
+                                    found = True
+                                    break
+                            if not found:
+                                st.warning("Predictions file does not contain 'y_pred' column; creating a zero column.")
+                                df_week['y_pred'] = 0.0
+                    
+                        # Coerce to numeric safely (operates on Series)
+                        df_week['y_true'] = pd.to_numeric(df_week['y_true'], errors='coerce')
+                        df_week['y_pred'] = pd.to_numeric(df_week['y_pred'], errors='coerce')
+                    
+                        # Fill NaNs with 0.0 (or you can choose another sentinel)
+                        df_week['y_true'] = df_week['y_true'].fillna(0.0)
+                        df_week['y_pred'] = df_week['y_pred'].fillna(0.0)
+                    
+                        # Normalize lat/lon column names (many variants exist)
+                        lat_candidates = ['latitude', 'lat', 'Latitude', 'LAT']
+                        lon_candidates = ['longitude', 'lon', 'Longitude', 'LON']
+                        lat_col = next((c for c in lat_candidates if c in df_week.columns), None)
+                        lon_col = next((c for c in lon_candidates if c in df_week.columns), None)
+                    
+                        if lat_col and lon_col:
+                            df_week['latitude'] = pd.to_numeric(df_week[lat_col], errors='coerce')
+                            df_week['longitude'] = pd.to_numeric(df_week[lon_col], errors='coerce')
+                        else:
+                            # Try merging nodes_df later will add coords; warn now
+                            df_week['latitude'] = df_week.get('latitude', pd.Series([pd.NA]*len(df_week)))
+                            df_week['longitude'] = df_week.get('longitude', pd.Series([pd.NA]*len(df_week)))
+                            st.info("Latitude/Longitude not found in predictions; attempting to merge with nodes.csv if available.")
+                    
+                        # Optional: ensure state/district columns are normalized (useful for merges)
+                        if 'state' in df_week.columns:
+                            df_week['state'] = df_week['state'].astype(str).str.strip().str.title()
+                        if 'district' in df_week.columns:
+                            df_week['district'] = df_week['district'].astype(str).str.strip().str.title()
+                    
+                        # Final sanity: if y_pred all zeros warn the user (common when column mismatched)
+                        if df_week['y_pred'].abs().sum() == 0.0:
+                            st.warning("All predicted values for this week are zero. Please verify the 'y_pred' column in the predictions CSV.")
+                    
+                    # Now df_week has y_true, y_pred, latitude, longitude columns as numeric Series safe for later plotting/logic.
                     if 'node_id' in nodes_df.columns and 'node_global_idx' in df_week.columns:
                         df_week = df_week.merge(nodes_df, left_on='node_global_idx', right_on='node_id', how='left')
                     else:
