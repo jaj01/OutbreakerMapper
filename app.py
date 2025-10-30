@@ -384,8 +384,8 @@ with tab3:
                 # ensure presence of 'y_pred' column
                 if 'y_pred' not in df_week.columns and 'predicted_cases' in df_week.columns:
                     df_week['y_pred'] = pd.to_numeric(df_week['predicted_cases'], errors='coerce').fillna(0.0)
-                if 'y_true' not in df_week.columns:
-                    df_week['y_true'] = pd.to_numeric(df_week.get('y_true', 0.0), errors='coerce').fillna(0.0)
+                #if 'y_true' not in df_week.columns:
+                    #df_week['y_true'] = pd.to_numeric(df_week.get('y_true', 0.0), errors='coerce').fillna(0.0)
 
                 sorted_week = df_week.sort_values('y_pred', ascending=False).reset_index(drop=True)
                 topk = sorted_week.head(k).copy()
