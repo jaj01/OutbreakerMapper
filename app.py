@@ -1,7 +1,9 @@
-# app.py (updated)
+# app.py - Robust OutbreakMapper Streamlit app (patched)
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
+import os
+import json
 import altair as alt
 import networkx as nx
 from geopy.distance import geodesic
@@ -9,68 +11,82 @@ from pyvis.network import Network
 import streamlit.components.v1 as components
 import folium
 from streamlit_folium import st_folium
-import numpy as np
-import os
-import json
 
-# OPTIONAL: import the inference helper if you want to run counterfactuals in-app
-# from inference import run_counterfactual_prediction
+# Try to import the inference helpers if present (optional)
+try:
+    from inference import load_model, run_counterfactual_prediction
+    HAS_INFERENCE = True
+except Exception:
+    HAS_INFERENCE = False
 
+# Page config
 st.set_page_config(page_title="OutbreakMapper", layout="wide")
 
-# --- Load data ---
+# --------------------
+# CACHED LOADERS
+# --------------------
 @st.cache_data
-def load_data():
-    df = pd.read_csv("outbreaker_with_final_coords_cleaned.csv")
-    df['state'] = df['state'].astype(str).str.strip().str.title()
-    df['district'] = df['district'].astype(str).str.strip().str.title()
-    if "year_week" not in df.columns:
-        df["year_week"] = df["year"].astype(str) + "_W" + df["week"].astype(str)
-    # unify lat/lon cols if present
-    if "latitude_y" in df.columns and "longitude_y" in df.columns:
-        df = df.rename(columns={"latitude_y": "latitude", "longitude_y": "longitude"})
+def load_outbreak_data(path="outbreaker_with_final_coords_cleaned.csv"):
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    # normalize column names
+    df.columns = [c.strip() for c in df.columns]
+    # ensure columns exist before manipulating
+    if 'state' in df.columns:
+        df['state'] = df['state'].astype(str).str.strip().str.title()
+    else:
+        df['state'] = ""
+    if 'district' in df.columns:
+        df['district'] = df['district'].astype(str).str.strip().str.title()
+    else:
+        df['district'] = ""
+    # ensure year_week
+    if 'year_week' not in df.columns and 'year' in df.columns and 'week' in df.columns:
+        df['year_week'] = df['year'].astype(str) + "_W" + df['week'].astype(str)
+    # unify lat/lon columns
+    if 'latitude_y' in df.columns and 'longitude_y' in df.columns:
+        df = df.rename(columns={'latitude_y': 'latitude', 'longitude_y': 'longitude'})
     return df
 
-df = load_data()
-
-# --- Load nodes/centroids if available ---
 @st.cache_data
 def load_nodes(nodes_path="data/processed/nodes.csv"):
     if os.path.exists(nodes_path):
         ndf = pd.read_csv(nodes_path)
-        ndf['state'] = ndf['state'].astype(str).str.strip().str.title()
-        ndf['district'] = ndf['district'].astype(str).str.strip().str.title()
+        ndf.columns = [c.strip() for c in ndf.columns]
+        if 'state' in ndf.columns:
+            ndf['state'] = ndf['state'].astype(str).str.title().str.strip()
+        if 'district' in ndf.columns:
+            ndf['district'] = ndf['district'].astype(str).str.title().str.strip()
         return ndf
-    # fallback try to build from df
-    fallback = df.groupby(['state','district'], as_index=False).agg({
-        'latitude': 'mean', 'longitude': 'mean'
-    })
-    fallback['node_id'] = range(len(fallback))
-    return fallback
+    # fallback: empty DF (app will derive centroids from outbreak if needed)
+    return pd.DataFrame()
 
-nodes_df = load_nodes()
-
-# --- Load predictions (if exist) ---
 @st.cache_data
-def load_predictions(path="predictions.csv.csv"):
+def load_predictions(path="outputs/predictions.csv"):
     if os.path.exists(path):
-        preds = pd.read_csv(path)
-        # Expect columns: time_batch_idx, node_global_idx, state, district, y_true, y_pred, year_week (optional)
-        if 'year_week' not in preds.columns:
-            # try infer or set 'all_weeks'
-            if 'time' in preds.columns:
-                preds['year_week'] = pd.to_datetime(preds['time']).dt.to_period('W').astype(str)
-            else:
-                preds['year_week'] = preds.get('year_week', 'all_weeks')
-        preds['state'] = preds['state'].astype(str).str.strip().str.title()
-        preds['district'] = preds['district'].astype(str).str.strip().str.title()
-        return preds
-    else:
-        return pd.DataFrame()  # empty DataFrame fallback
+        p = pd.read_csv(path)
+        p.columns = [c.strip() for c in p.columns]
+        if 'year_week' not in p.columns and 'time' in p.columns:
+            try:
+                p['year_week'] = pd.to_datetime(p['time']).dt.to_period('W').astype(str)
+            except Exception:
+                p['year_week'] = p.get('year_week', 'all_weeks')
+        elif 'year_week' not in p.columns:
+            p['year_week'] = p.get('year_week', 'all_weeks')
+        # normalize names
+        if 'state' in p.columns:
+            p['state'] = p['state'].astype(str).str.strip().str.title()
+        if 'district' in p.columns:
+            p['district'] = p['district'].astype(str).str.strip().str.title()
+        # Ensure numeric y_pred and y_true exist for safety
+        if 'y_pred' in p.columns:
+            p['y_pred'] = pd.to_numeric(p['y_pred'], errors='coerce').fillna(0.0)
+        if 'y_true' in p.columns:
+            p['y_true'] = pd.to_numeric(p['y_true'], errors='coerce').fillna(0.0)
+        return p
+    return pd.DataFrame()
 
-preds_df = load_predictions()
-
-# --- Load simplified geojson if you have one ---
 @st.cache_data
 def load_geojson(path="artifacts/india_districts_simplified.geojson"):
     if os.path.exists(path):
@@ -78,300 +94,457 @@ def load_geojson(path="artifacts/india_districts_simplified.geojson"):
             return json.load(f)
     return None
 
+# --------------------
+# Data
+# --------------------
+df = load_outbreak_data()
+nodes_df = load_nodes()
+preds_df = load_predictions()
 geojson = load_geojson()
 
-# --- Sidebar filters ---
-st.sidebar.header("⚙️ Filters & Precaution thresholds")
+# --------------------
+# Sidebar: filters & simulation
+# --------------------
+st.sidebar.header("Filters & Simulation")
+diseases = ["All"] + (sorted(df['disease_grouped'].dropna().unique().tolist()) if not df.empty and 'disease_grouped' in df.columns else [])
+selected_disease = st.sidebar.selectbox("Select Disease", diseases, index=0 if len(diseases)>0 else 0)
 
-# Disease filter
-diseases = ["All"] + sorted(df["disease_grouped"].dropna().unique().tolist())
-selected_disease = st.sidebar.selectbox("Select Disease", diseases)
-
-# State filter
-states = ["All"] + sorted(df["state"].dropna().unique().tolist())
+states = ["All"] + (sorted(df['state'].dropna().unique().tolist()) if not df.empty and 'state' in df.columns else [])
 selected_states = st.sidebar.multiselect("Select States", states, default=["All"])
 
-# Hotspot thresholds (tunable)
-st.sidebar.markdown("### Hotspot thresholds (tuneable)")
-HIGH_CASES_THRESH = st.sidebar.number_input("High raw-case threshold (absolute)", value=50, step=10)
-PCT_INCREASE_THRESH = st.sidebar.number_input("Pct increase threshold (e.g., 30% -> 0.30)", value=0.30, step=0.05, format="%.2f")
-INCIDENCE_RATE_THRESH = st.sidebar.number_input("Incidence threshold (pred/pop) e.g. 0.001", value=0.001, step=0.0005, format="%.4f")
+# NOTE: Hotspot thresholds removed from sidebar per request.
+# Use fixed thresholds inside the precaution engine below.
+# Constants (fixed)
+FIXED_HIGH_CASES_THRESH = 50
+FIXED_PCT_INCREASE_THRESH = 0.30
+FIXED_INCIDENCE_RATE_THRESH = 0.001
 
-# --- Apply filters ---
-filtered_df = df.copy()
-if selected_disease != "All":
-    filtered_df = filtered_df[filtered_df["disease_grouped"] == selected_disease]
+# Counterfactual controls
+st.sidebar.markdown("### Counterfactual (mobility)")
+mob_scale = st.sidebar.slider("Mobility scale (0=lockdown, 1=no change)", min_value=0.0, max_value=1.0, value=1.0, step=0.05, key="mob_scale")
+run_cf = st.sidebar.button("Run counterfactual") if HAS_INFERENCE else st.sidebar.button("Run counterfactual (disabled)")
 
-if "All" not in selected_states:
-    filtered_df = filtered_df[filtered_df["state"].isin(selected_states)]
+if not HAS_INFERENCE and run_cf:
+    st.sidebar.warning("Inference module not found. Place inference.py (with load_model + run_counterfactual_prediction) in the app folder.")
 
-# --- Base Graph (neighbors by distance) ---
+# --------------------
+# Apply filters
+# --------------------
+filtered_df = df.copy() if not df.empty else pd.DataFrame()
+if selected_disease and selected_disease != "All" and 'disease_grouped' in filtered_df.columns:
+    filtered_df = filtered_df[filtered_df['disease_grouped'] == selected_disease]
+if selected_states and "All" not in selected_states and 'state' in filtered_df.columns:
+    filtered_df = filtered_df[filtered_df['state'].isin(selected_states)]
+
+# --------------------
+# Helper: build base graph (spatial neighbors)
+# --------------------
 @st.cache_data
-def build_base_graph(df, dist_threshold=100):
-    # derive centroids (unique district rows)
-    districts = df.groupby(["state","district","latitude","longitude"]).size().reset_index().drop(columns=0)
-    G_base = nx.Graph()
-    for _, row in districts.iterrows():
-        # if lat/lon missing, skip node (or add with None)
-        G_base.add_node(row["district"], state=row["state"], pos=(row["longitude"], row["latitude"]))
-    # compute pairwise distances (can be optimized)
-    for i, row1 in districts.iterrows():
-        for j, row2 in districts.iterrows():
+def build_base_graph(df_local, dist_threshold=120):
+    if df_local.empty:
+        return nx.Graph()
+    # unique district centroids
+    # handle possible column name inconsistencies
+    lat_col = 'latitude' if 'latitude' in df_local.columns else None
+    lon_col = 'longitude' if 'longitude' in df_local.columns else None
+    districts = None
+    if lat_col and lon_col:
+        districts = df_local.groupby(['state','district',lat_col,lon_col]).size().reset_index().drop(columns=0)
+        districts = districts.rename(columns={lat_col:'latitude', lon_col:'longitude'})
+    else:
+        # fallback: group only by state/district (no coords)
+        districts = df_local.groupby(['state','district']).size().reset_index().drop(columns=0)
+        districts['latitude'] = np.nan
+        districts['longitude'] = np.nan
+
+    G = nx.Graph()
+    # add nodes
+    for _, r in districts.iterrows():
+        name = r['district']
+        G.add_node(name, state=r['state'], latitude=r['latitude'], longitude=r['longitude'])
+    # pairwise edges (simple O(N^2); ok for ~700 nodes)
+    for i, r1 in districts.iterrows():
+        for j, r2 in districts.iterrows():
             if i < j:
+                lat1, lon1 = r1['latitude'], r1['longitude']
+                lat2, lon2 = r2['latitude'], r2['longitude']
+                if pd.isna(lat1) or pd.isna(lat2):
+                    continue
                 try:
-                    if pd.isna(row1["latitude"]) or pd.isna(row2["latitude"]):
-                        continue
-                    dist = geodesic((row1["latitude"], row1["longitude"]),
-                                    (row2["latitude"], row2["longitude"])).km
-                    if dist <= dist_threshold:
-                        G_base.add_edge(row1["district"], row2["district"], distance=dist)
+                    d = geodesic((lat1, lon1), (lat2, lon2)).km
                 except Exception:
                     continue
-    return G_base
+                if d <= dist_threshold:
+                    G.add_edge(r1['district'], r2['district'], distance=d)
+    return G
 
 G_base = build_base_graph(df)
 
-# ================
-# TABS (3 total)
-# ================
-tab1, tab2, tab3 = st.tabs(["🌐 Network Graph", "🗺️ Maps & Trends", "📈 Predictions"])
+# --------------------
+# Layout: tabs
+# --------------------
+tab1, tab2, tab3 = st.tabs(["🌐 Network Graph", "🗺️ Maps & Trends", "📈 Predictions & Simulation"])
 
 # ======================
 # TAB 1: NETWORK GRAPH
 # ======================
 with tab1:
     st.header("🌐 Temporal Disease Spread Network")
-
-    weeks = sorted(filtered_df["year_week"].dropna().unique())
-    if weeks:
-        week_idx = st.slider("Select Week", 0, len(weeks)-1, 0, key="week_slider_net")
+    weeks = sorted(filtered_df['year_week'].dropna().unique().tolist()) if not filtered_df.empty and 'year_week' in filtered_df.columns else []
+    if not weeks:
+        st.info("No weeks available in outbreak data (check 'year_week' column).")
+    else:
+        # ensure slider default is valid and unique key
+        week_idx = st.slider("Select Week (network)", min_value=0, max_value=len(weeks)-1, value=len(weeks)-1, step=1, key="week_net")
         selected_week = weeks[week_idx]
-        st.subheader(f"📅 Network for: **{selected_week}** | Disease: **{selected_disease}**")
+        st.subheader(f"Network for {selected_week} | Disease: {selected_disease}")
 
-        week_cases = filtered_df[filtered_df["year_week"] == selected_week].groupby("district")["cases"].sum().to_dict()
-
+        week_cases = filtered_df[filtered_df['year_week'] == selected_week].groupby('district')['cases'].sum().to_dict()
         G = G_base.copy()
+        # set node cases
         for n in G.nodes:
-            G.nodes[n]["cases"] = week_cases.get(n, 0)
-        for u, v, data in G.edges(data=True):
-            cases_u = G.nodes[u]["cases"]
-            cases_v = G.nodes[v]["cases"]
-            data["weight"] = 1 / (1 + abs(cases_u - cases_v))
+            G.nodes[n]['cases'] = week_cases.get(n, 0)
+        # set weights based on similarity
+        for u, v, d in G.edges(data=True):
+            cu = G.nodes[u].get('cases', 0)
+            cv = G.nodes[v].get('cases', 0)
+            d['weight'] = 1.0 / (1.0 + abs(cu - cv))
 
-        net = Network(height="700px", width="100%", bgcolor="#222222", font_color="white")
+        # pyvis visual
+        net = Network(height="700px", width="100%", bgcolor="#111111", font_color="white")
         for n, data in G.nodes(data=True):
-            net.add_node(
-                n,
-                label=f"{n} ({data['state']})",
-                title=f"District: {n}<br>State: {data['state']}<br>Cases: {data['cases']}",
-                size=max(5, data['cases']/10) if isinstance(data.get('cases'), (int,float)) else 5,
-                color="red" if data.get('cases', 0) > 100 else "orange"
-            )
-        for u, v, data in G.edges(data=True):
-            net.add_edge(u, v, value=data.get('weight', 1.0))
-
+            size_val = 5
+            try:
+                size_val = max(5, float(data.get('cases', 0)) / 10.0)
+            except Exception:
+                size_val = 5
+            color = "red" if data.get('cases', 0) > 100 else "orange"
+            net.add_node(n,
+                         label=f"{n}",
+                         title=f"{n} ({data.get('state','')})\nCases: {int(data.get('cases',0))}",
+                         size=size_val, color=color)
+        for u, v, d in G.edges(data=True):
+            net.add_edge(u, v, value=d.get('weight', 1.0))
         html_str = net.generate_html()
         components.html(html_str, height=750, scrolling=True)
-    else:
-        st.warning("No weeks available in dataset.")
 
 # ======================
 # TAB 2: MAPS & TRENDS
 # ======================
 with tab2:
     st.header("🗺️ District Bubble Maps & Trends")
-
-    # --- Bubble Map ---
     st.subheader(f"District Bubble Map ({selected_disease})")
-    district_cases = filtered_df.groupby(["state", "district", "latitude", "longitude"])["cases"].sum().reset_index()
 
-    m = folium.Map(location=[20.5937, 78.9629], zoom_start=5, tiles="CartoDB positron")
-
-    for _, row in district_cases.iterrows():
-        if pd.notna(row["latitude"]) and pd.notna(row["longitude"]):
-            folium.CircleMarker(
-                location=[row["latitude"], row["longitude"]],
-                radius=max(3, float(row["cases"]) / 20),
-                popup=f"{row['district']}, {row['state']}<br>Cases: {int(row['cases'])}",
-                color="red",
-                fill=True,
-                fill_opacity=0.6
-            ).add_to(m)
-
-    st_folium(m, width=900, height=600)
-
-    # --- Trends ---
-    st.subheader(f"Top District Trends ({selected_disease})")
-    top_districts = filtered_df.groupby("district")["cases"].sum().nlargest(5).index.tolist()
-    trend_data = filtered_df[filtered_df["district"].isin(top_districts)]
-
-    if not trend_data.empty:
-        # Ensure year_week is sorted sequentially (string->period)
-        try:
-            trend_data['year_week_pd'] = pd.to_datetime(trend_data['reporting_date'])
-        except:
-            trend_data['year_week_pd'] = trend_data['year_week']
-        chart = (
-            alt.Chart(trend_data)
-            .mark_line(point=True)
-            .encode(
-                x="year_week:T" if 'reporting_date' in trend_data.columns else "year_week:N",
-                y="cases:Q",
-                color="district:N",
-                tooltip=["district", "year_week", "cases"]
-            )
-            .properties(width=800, height=400)
-        )
-        st.altair_chart(chart, use_container_width=True)
+    if filtered_df.empty:
+        st.info("No outbreak rows to show (after filters).")
     else:
-        st.info("No trend data available for this disease.")
+        district_cases = filtered_df.groupby(['state','district','latitude','longitude'])['cases'].sum().reset_index()
+        m = folium.Map(location=[20.5937,78.9629], zoom_start=5, tiles="CartoDB positron")
+        for _, r in district_cases.iterrows():
+            lat, lon = r['latitude'], r['longitude']
+            if pd.notna(lat) and pd.notna(lon):
+                folium.CircleMarker(location=[lat, lon],
+                                    radius=max(3, float(r['cases'])/20),
+                                    popup=f"{r['district']}, {r['state']}<br>Cases: {int(r['cases'])}",
+                                    color="red", fill=True, fill_opacity=0.6).add_to(m)
+        st_folium(m, width=900, height=600)
+
+        # Trends for top districts
+        st.subheader("Top District Trends")
+        top5 = filtered_df.groupby('district')['cases'].sum().nlargest(5).index.tolist()
+        trend_data = filtered_df[filtered_df['district'].isin(top5)].copy()
+        if trend_data.empty:
+            st.info("No trend data available.")
+        else:
+            # if reporting_date exists, use it else year_week
+            x_col = 'reporting_date' if 'reporting_date' in trend_data.columns else 'year_week'
+            # handle date vs categorical axis
+            if x_col == 'reporting_date':
+                trend_data['reporting_date'] = pd.to_datetime(trend_data['reporting_date'], errors='coerce')
+                chart = (alt.Chart(trend_data)
+                         .mark_line(point=True)
+                         .encode(x="reporting_date:T", y="cases:Q", color="district:N", tooltip=["district", "year_week", "cases"])
+                         .properties(width=800, height=400))
+            else:
+                chart = (alt.Chart(trend_data)
+                         .mark_line(point=True)
+                         .encode(x=alt.X("year_week:N", sort=None), y="cases:Q", color="district:N", tooltip=["district", "year_week", "cases"])
+                         .properties(width=800, height=400))
+            st.altair_chart(chart, use_container_width=True)
 
 # ======================
-# TAB 3: PREDICTIONS
+# TAB 3: PREDICTIONS & SIMULATION
 # ======================
 with tab3:
-    st.header("📈 Model Predictions & Precautions")
+    st.header("📈 Predictions & Counterfactual Simulation")
 
     if preds_df.empty:
-        st.warning("Predictions file not found at outputs/predictions.csv. Place predictions.csv at that path and reload.")
+        st.warning("Predictions CSV not found at 'outputs/predictions.csv'. Place predictions.csv there or update the loader path.")
     else:
-        # Week selection
-        weeks_p = sorted(preds_df['year_week'].unique())
-        if weeks_p:
-            sel_week_idx = st.slider(
-                "Select week (predictions)",
-                0,
-                len(weeks_p)-1,
-                len(weeks_p)-1,
-                key="week_slider_pred"
-            )
-            sel_week = weeks_p[sel_week_idx]
-            st.subheader(f"Predictions for week: {sel_week}")
+        # safe weeks list
+        weeks_p = sorted(preds_df['year_week'].dropna().astype(str).unique().tolist())
+        if not weeks_p:
+            st.warning("No valid 'year_week' values in predictions.csv.")
         else:
-            st.warning("⚠️ No prediction weeks available. Please check predictions.csv.")
-            sel_week = None
-        #sel_week_idx = st.slider("Select week (predictions)", 0, max(0, len(weeks_p)-1), max(0, len(weeks_p)-1), key="week_slider_pred")
-        #sel_week = weeks_p[sel_week_idx]
-        #st.subheader(f"Predictions for: {sel_week}")
+            # guard slider; use unique key
+            sel_idx = st.slider("Select prediction week", min_value=0, max_value=len(weeks_p)-1, value=len(weeks_p)-1, step=1, key="week_pred")
+            sel_week = weeks_p[sel_idx]
+            st.subheader(f"Predictions for {sel_week}")
 
-
-        # filter preds
-        df_week = preds_df[preds_df['year_week'] == sel_week].copy()
-
-        # merge centroids/pop if available
-        if not nodes_df.empty:
-            if 'node_id' in nodes_df.columns and 'node_global_idx' in df_week.columns:
-                df_week = df_week.merge(nodes_df, left_on='node_global_idx', right_on='node_id', how='left')
+            df_week = preds_df[preds_df['year_week'].astype(str) == sel_week].copy()
+            if df_week.empty:
+                st.info("No predictions for the selected week.")
             else:
-                df_week = df_week.merge(nodes_df, on=['state', 'district'], how='left')
+                # merge centroids if nodes_df present
+                if not nodes_df.empty:
+                    if 'node_id' in nodes_df.columns and 'node_global_idx' in df_week.columns:
+                        df_week = df_week.merge(nodes_df, left_on='node_global_idx', right_on='node_id', how='left')
+                    else:
+                        # merge by state/district if possible
+                        if set(['state','district']).issubset(nodes_df.columns) and set(['state','district']).issubset(df_week.columns):
+                            df_week = df_week.merge(nodes_df, on=['state','district'], how='left')
 
-        # Top-K
-        k = st.slider("Top K hotspots", 5, 50, 10, key="hotspot_k")
-        df_week_sorted = df_week.sort_values('y_pred', ascending=False).reset_index(drop=True)
-        topk_df = df_week_sorted.head(k).copy()
-        topk_df['rank_pred'] = range(1, len(topk_df)+1)
+                # Top-K hotspots
+                k = st.slider("Top K hotspots", 5, 50, 10, key="hot_k")
+                # ensure presence of 'y_pred' column
+                if 'y_pred' not in df_week.columns and 'predicted_cases' in df_week.columns:
+                    df_week['y_pred'] = pd.to_numeric(df_week['predicted_cases'], errors='coerce').fillna(0.0)
+                if 'y_true' not in df_week.columns:
+                    df_week['y_true'] = pd.to_numeric(df_week.get('y_true', 0.0), errors='coerce').fillna(0.0)
 
-        st.subheader(f"Top {k} predicted hotspots")
-        st.dataframe(topk_df[['rank_pred','state','district','y_true','y_pred']])
+                sorted_week = df_week.sort_values('y_pred', ascending=False).reset_index(drop=True)
+                topk = sorted_week.head(k).copy()
+                topk['rank'] = range(1, len(topk)+1)
+                st.subheader(f"Top {k} predicted hotspots")
+                display_cols = ['rank','state','district','y_true','y_pred'] if set(['y_true','y_pred']).issubset(topk.columns) else topk.columns.tolist()
+                st.dataframe(topk[display_cols])
 
-        # Map view (prefer geojson->choropleth, otherwise folium bubble)
-        st.subheader("Spatial view (predicted cases)")
+                # Map: prefer geojson choropleth if available
+                geo_failed = False
+                if geojson is not None and len(geojson.get('features', []))>0:
+                    # attempt to find district property name
+                    sample_props = geojson['features'][0]['properties']
+                    geo_prop = None
+                    for cand in ['DIST_NAME','DISTRICT','district','DIST','NAME_2','DT_NAME','DIST_NAME']:
+                        if cand in sample_props:
+                            geo_prop = cand
+                            break
+                    if geo_prop:
+                        # create mapping uppercase -> value
+                        mapping = {}
+                        for _, r in df_week.iterrows():
+                            dname = str(r.get('district', '')).upper()
+                            try:
+                                mapping[dname] = float(r.get('y_pred', 0.0))
+                            except Exception:
+                                mapping[dname] = 0.0
+                        # annotate features
+                        for feat in geojson['features']:
+                            pname = str(feat['properties'].get(geo_prop, '')).upper()
+                            feat['properties']['y_pred'] = mapping.get(pname, 0.0)
+                        m = folium.Map(location=[20.5937,78.9629], zoom_start=5, tiles="CartoDB positron")
+                        try:
+                            folium.Choropleth(geo_data=geojson, name='Predicted', data=df_week,
+                                              columns=['district','y_pred'] if 'district' in df_week.columns else ['node_global_idx','y_pred'],
+                                              key_on=f'feature.properties.{geo_prop}',
+                                              fill_color='YlOrRd', fill_opacity=0.7, line_opacity=0.2,
+                                              legend_name='Predicted cases').add_to(m)
+                        except Exception:
+                            geo_failed = True
+                        # add topk markers
+                        for _, r in topk.iterrows():
+                            lat = r.get('latitude') or r.get('Latitude') or None
+                            lon = r.get('longitude') or r.get('Longitude') or None
+                            if pd.notna(lat) and pd.notna(lon):
+                                folium.CircleMarker(location=[lat, lon],
+                                                    radius=max(6, np.log1p(float(r.get('y_pred',0.0)))*2),
+                                                    popup=f"{r.get('district','')} ({r.get('state','')})\nPred: {float(r.get('y_pred',0.0)):.1f}",
+                                                    color='crimson', fill=True, fill_opacity=0.9).add_to(m)
+                        if not geo_failed:
+                            st_folium(m, width=900, height=650)
+                        else:
+                            # fallback handled below
+                            pass
+                    else:
+                        geo_failed = True
+                else:
+                    geo_failed = True
 
-        if geojson is not None:
-            # Try to match district property in geojson
-            sample_props = geojson['features'][0]['properties']
-            geo_prop = None
-            for c in ['DIST_NAME','DIST_NAME','DISTRICT','DIST_NAME','district','DIST']:
-                if c in sample_props:
-                    geo_prop = c
-                    break
+                if geo_failed:
+                    # fallback bubble map using lat/lon in df_week
+                    if 'latitude' in df_week.columns and 'longitude' in df_week.columns:
+                        m2 = folium.Map(location=[20.5937,78.9629], zoom_start=5, tiles="CartoDB positron")
+                        for _, r in df_week.iterrows():
+                            lat, lon = r.get('latitude'), r.get('longitude')
+                            if pd.notna(lat) and pd.notna(lon):
+                                folium.CircleMarker(location=[lat, lon],
+                                                    radius=max(3, float(r.get('y_pred',0.0))/10),
+                                                    popup=f"{r.get('district','')}, {r.get('state','')}<br>Pred: {float(r.get('y_pred',0.0)):.1f}",
+                                                    color='red', fill=True, fill_opacity=0.7).add_to(m2)
+                        st_folium(m2, width=900, height=650)
+                    else:
+                        st.warning("No coordinates available for mapping. Provide nodes.csv with lat/lon or a geojson file.")
 
-            if geo_prop:
-                # Map predicted value into geojson properties (best-effort matching by uppercase name)
-                mapping = {str(r['district']).upper(): float(r['y_pred']) for _, r in df_week.iterrows() if pd.notna(r['district'])}
-                for feat in geojson['features']:
-                    pname = str(feat['properties'].get(geo_prop, '')).upper()
-                    feat['properties']['y_pred'] = mapping.get(pname, 0.0)
+                # Precaution engine (multi-tier) — uses fixed thresholds declared above
+                st.subheader("Precaution recommendations (Top hotspots)")
+                def compute_severity_and_recs(row):
+                    preds = float(row.get('y_pred', 0.0))
+                    prev = float(row.get('y_true', 0.0))
+                    pop = None
+                    for key in ['population','Population','pop','POP']:
+                        if key in row:
+                            try:
+                                pop = float(row.get(key))
+                                break
+                            except Exception:
+                                pop = None
+                    incidence = (preds / pop) if pop and pop>0 else 0.0
+                    pct_inc = ((preds - prev)/prev) if prev>0 else (1.0 if preds>0 else 0.0)
+                    # normalized scores using fixed thresholds
+                    s_abs = preds / max(1.0, FIXED_HIGH_CASES_THRESH)
+                    s_pct = min(pct_inc / max(1e-6, FIXED_PCT_INCREASE_THRESH), 5.0)
+                    s_inc = incidence / max(1e-6, FIXED_INCIDENCE_RATE_THRESH)
+                    score = 0.6*s_abs + 0.3*s_pct + 0.1*s_inc
+                    # severity tier
+                    if score < 1.5:
+                        tier = "Low"
+                        msgs = ["Maintain public advisories: testing availability, hygiene, mask promotion."]
+                    elif score < 3.0:
+                        tier = "Medium"
+                        msgs = ["Increase surveillance and testing capacity; targeted public messaging; prepare local isolation facilities."]
+                    elif score < 5.0:
+                        tier = "High"
+                        msgs = ["Scale up testing & contact tracing; consider targeted mobility restrictions; prioritize vaccination for vulnerable groups."]
+                    else:
+                        tier = "Critical"
+                        msgs = ["Immediate surge preparedness (hospitals, O2); implement strict mobility reduction; mass testing & targeted lockdowns if necessary."]
+                    return tier, score, msgs
 
-                m = folium.Map(location=[20.5937, 78.9629], zoom_start=5, tiles="CartoDB positron")
-                folium.Choropleth(
-                    geo_data=geojson,
-                    name='Predicted cases',
-                    data=df_week,
-                    columns=['district','y_pred'] if 'district' in df_week.columns else ['node_global_idx','y_pred'],
-                    key_on=f'feature.properties.{geo_prop}',
-                    fill_color='YlOrRd',
-                    fill_opacity=0.7,
-                    line_opacity=0.2,
-                    legend_name='Predicted cases'
-                ).add_to(m)
+                for _, r in topk.iterrows():
+                    tier, score, msgs = compute_severity_and_recs(r)
+                    ypred = float(r.get('y_pred', 0.0))
+                    ytrue = float(r.get('y_true', 0.0))
+                    st.markdown(f"**{r.get('state','')} — {r.get('district','')}**  Pred: **{ypred:.1f}** Prev: **{ytrue:.1f}**")
+                    st.markdown(f"**Severity:** {tier}  |  **Score:** {score:.2f}")
+                    for m in msgs:
+                        st.write(f"- {m}")
+                    st.write("---")
 
-                # add top-k markers
-                for _, r in topk_df.iterrows():
-                    lat = r.get('latitude') or r.get('Latitude')
-                    lon = r.get('longitude') or r.get('Longitude')
-                    if pd.notna(lat) and pd.notna(lon):
-                        folium.CircleMarker(
-                            location=[lat, lon],
-                            radius=max(6, np.log1p(r['y_pred']) * 2),
-                            popup=f"{r['state']} - {r['district']}<br>Pred: {r['y_pred']:.1f}",
-                            color='crimson', fill=True, fill_opacity=0.9
-                        ).add_to(m)
-                st_folium(m, width=900, height=650)
-            else:
-                st.info("GeoJSON loaded but no matching district property found — falling back to bubble map.")
-                geo_match_failed = True
-        else:
-            geo_match_failed = True
+                # Download weekly predictions
+                st.download_button("Download this week's predictions (CSV)", data=df_week.to_csv(index=False),
+                                   file_name=f"predictions_{sel_week}.csv", mime="text/csv")
 
-        if geojson is None or ('geo_match_failed' in locals() and geo_match_failed):
-            # fallback bubble map using lat/lon
-            if 'latitude' in df_week.columns and 'longitude' in df_week.columns:
-                m2 = folium.Map(location=[20.5937,78.9629], zoom_start=5, tiles="CartoDB positron")
-                for _, r in df_week.iterrows():
-                    if pd.notna(r.get('latitude')) and pd.notna(r.get('longitude')):
-                        folium.CircleMarker(
-                            location=[r['latitude'], r['longitude']],
-                            radius=max(3, float(r['y_pred']) / 10),
-                            popup=f"{r['district']}, {r['state']}<br>Pred: {r['y_pred']:.1f}",
-                            color='red', fill=True, fill_opacity=0.7
-                        ).add_to(m2)
-                st_folium(m2, width=900, height=650)
-            else:
-                st.warning("No coordinates available for bubble map. Provide nodes.csv with lat/lon or a geojson for choropleth.")
+                # --------------- Counterfactual simulation (guarded) ---------------
+                st.markdown("### Counterfactual simulation (mobility scaling)")
+                # check prerequisites
+                SNAPSHOT_DIR = "data/pyg_snapshots"
+                MODEL_PATH = "artifacts/models/best_tgcn_gru.pth"
 
-        # Precaution generation: display per-topk
-        st.subheader("Precaution recommendations (top hotspots)")
-        for _, r in topk_df.iterrows():
-            # simple rule engine (tweakable)
-            recs = []
-            y_pred = float(r.get('y_pred', 0.0))
-            y_prev = float(r.get('y_true', 0.0))
-            pop = r.get('population') or r.get('Population') or None
-            inc_rate = (y_pred / pop) if pop and pop > 0 else None
+                def load_snapshot_sequence(target_week, window=4):
+                    """Load up to 'window' snapshots ending at target_week from SNAPSHOT_DIR.
+                       Expects files named '<year_week>.npz' containing arrays:
+                        - node_features (N,F)
+                        - edge_index (2,E)
+                        - edge_weight (E)
+                    """
+                    if not os.path.exists(SNAPSHOT_DIR):
+                        return None
+                    all_files = sorted([f for f in os.listdir(SNAPSHOT_DIR) if f.endswith(".npz")])
+                    weeks_avail = [os.path.splitext(f)[0] for f in all_files]
+                    if target_week in weeks_avail:
+                        idx = weeks_avail.index(target_week)
+                        start = max(0, idx - window + 1)
+                        sel_files = all_files[start: idx+1]
+                    else:
+                        # fallback: most recent window
+                        sel_files = all_files[-window:]
+                    if not sel_files:
+                        return None
+                    feats = []
+                    eis = []
+                    ews = []
+                    for fname in sel_files:
+                        try:
+                            npz = np.load(os.path.join(SNAPSHOT_DIR, fname), allow_pickle=True)
+                            feats.append(npz['node_features'])
+                            eis.append(npz['edge_index'])
+                            ews.append(npz['edge_weight'])
+                        except Exception:
+                            return None
+                    return np.stack(feats, axis=0), eis, ews
 
-            if y_pred >= HIGH_CASES_THRESH:
-                recs.append("Scale-up testing, contact tracing and isolation facilities.")
-            if y_prev > 0 and (y_pred - y_prev) / max(1, y_prev) >= PCT_INCREASE_THRESH:
-                recs.append("Increase surveillance and consider temporary mobility restrictions.")
-            if inc_rate is not None and inc_rate > INCIDENCE_RATE_THRESH:
-                recs.append("Prioritize targeted vaccination and public awareness in the district.")
-            if y_pred >= 100:
-                recs.append("Prepare hospital surge capacity and essential supplies (O2, beds).")
-            if not recs:
-                recs.append("Maintain general NPIs: mask use, testing, and hygiene promotion.")
+                # Only allow running CF if inference module present
+                if not HAS_INFERENCE:
+                    st.info("Counterfactual simulation disabled — inference module not found. Add inference.py (with load_model+run_counterfactual_prediction) to enable.")
+                else:
+                    # Show info about availability
+                    has_snap = os.path.exists(SNAPSHOT_DIR) and len([f for f in os.listdir(SNAPSHOT_DIR) if f.endswith('.npz')])>0
+                    has_model = os.path.exists(MODEL_PATH)
+                    if not has_snap:
+                        st.warning(f"Snapshot folder '{SNAPSHOT_DIR}' missing or empty. Place .npz snapshot files to run CF.")
+                    if not has_model:
+                        st.warning(f"Model checkpoint not found at '{MODEL_PATH}'. Place trained checkpoint to run CF.")
+                    if has_snap and has_model:
+                        if st.button("Run counterfactual now (scale mobility)", key="run_cf_now"):
+                            snap = load_snapshot_sequence(sel_week, window=4)
+                            if snap is None:
+                                st.error("Could not load required snapshot sequence for this week. Check file naming and contents.")
+                            else:
+                                node_feat_seq, edge_index_seq, edge_weight_seq = snap
+                                try:
+                                    # infer in_feats
+                                    in_feats = node_feat_seq.shape[2]
+                                    model = load_model(MODEL_PATH, in_feats=in_feats)
+                                except Exception as e:
+                                    st.error(f"Model load failed: {e}")
+                                    model = None
+                                if model is not None:
+                                    st.info("Running baseline and counterfactual inferences (this may take a moment)...")
+                                    preds_base = run_counterfactual_prediction(model, node_feat_seq, edge_index_seq, edge_weight_seq, mobility_scale=1.0)
+                                    preds_cf = run_counterfactual_prediction(model, node_feat_seq, edge_index_seq, edge_weight_seq, mobility_scale=float(mob_scale))
 
-            st.markdown(f"**{r['state']} — {r['district']}** (Pred: {y_pred:.1f}, Prev: {y_prev:.1f})")
-            for rec in recs:
-                st.write(f"- {rec}")
-            st.write("---")
+                                    # prepare results dataframe using nodes_df if available
+                                    mapping_nodes = nodes_df.copy() if not nodes_df.empty else None
+                                    if mapping_nodes is not None and 'node_id' in mapping_nodes.columns:
+                                        nodemap = mapping_nodes.sort_values('node_id').reset_index(drop=True)
+                                    else:
+                                        # fallback create node_id and mapping from df_week or nodes_df
+                                        nodemap = mapping_nodes.reset_index().rename(columns={'index':'node_id'}) if mapping_nodes is not None else pd.DataFrame({'node_id': range(len(preds_base))})
+                                    res = nodemap[['node_id','state','district','latitude','longitude']].copy() if not nodemap.empty else pd.DataFrame({'node_id': range(len(preds_base))})
+                                    res['pred_base'] = preds_base[:len(res)]
+                                    res['pred_cf'] = preds_cf[:len(res)]
+                                    res['delta'] = res['pred_cf'] - res['pred_base']
 
-        # Download weekly predictions
-        st.markdown("### Download")
-        st.download_button(
-            label="Download weekly predictions (CSV)",
-            data=df_week.to_csv(index=False),
-            file_name=f"predictions_{sel_week}.csv",
-            mime="text/csv"
-        )
-# End of app
+                                    # show side-by-side small maps
+                                    c1, c2, c3 = st.columns([1,1,0.8])
+                                    with c1:
+                                        st.markdown("**Baseline**")
+                                        m_b = folium.Map(location=[20.5937,78.9629], zoom_start=5, tiles="CartoDB positron")
+                                        for _, r in res.iterrows():
+                                            lat, lon = r.get('latitude'), r.get('longitude')
+                                            if pd.notna(lat) and pd.notna(lon):
+                                                folium.CircleMarker(location=[lat, lon],
+                                                                    radius=max(3, float(r['pred_base'])/10),
+                                                                    popup=f"{r.get('district','')} ({r.get('state','')})\nPred: {r['pred_base']:.1f}",
+                                                                    color='blue', fill=True, fill_opacity=0.7).add_to(m_b)
+                                        st_folium(m_b, width=420, height=420)
+                                    with c2:
+                                        st.markdown(f"**Counterfactual (mob × {mob_scale:.2f})**")
+                                        m_c = folium.Map(location=[20.5937,78.9629], zoom_start=5, tiles="CartoDB positron")
+                                        for _, r in res.iterrows():
+                                            lat, lon = r.get('latitude'), r.get('longitude')
+                                            if pd.notna(lat) and pd.notna(lon):
+                                                folium.CircleMarker(location=[lat, lon],
+                                                                    radius=max(3, float(r['pred_cf'])/10),
+                                                                    popup=f"{r.get('district','')} ({r.get('state','')})\nPred: {r['pred_cf']:.1f}",
+                                                                    color='green', fill=True, fill_opacity=0.7).add_to(m_c)
+                                        st_folium(m_c, width=420, height=420)
+                                    with c3:
+                                        st.markdown("**Delta (CF - Baseline)**")
+                                        st.dataframe(res[['state','district','pred_base','pred_cf','delta']].sort_values('delta', ascending=False).head(15))
+
+                                    # allow download
+                                    st.download_button("Download counterfactual CSV",
+                                                       data=res.to_csv(index=False),
+                                                       file_name=f"counterfactual_{sel_week}_mob{mob_scale:.2f}.csv",
+                                                       mime="text/csv")
