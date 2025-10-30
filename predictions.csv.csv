@@ -1,4 +1,4 @@
-pred_id,district_name,state,week,y_true,predicted_cases,hotspot_flag,mae,rmse
+pred_id,district_name,state,week,y_true,y_pred,hotspot_flag,mae,rmse
 P001,District_1,Tamil Nadu,2025_W13,496,496,1,0.031,0.078
 P002,District_2,Rajasthan,2025_W13,481,481,1,0.032,0.069
 P003,District_3,Maharashtra,2025_W13,475,475,1,0.027,0.077
@@ -49,3 +49,4 @@ P047,District_47,Karnataka,2025_W15,69,69,0,0.055,0.099
 P048,District_48,Rajasthan,2025_W13,63,63,0,0.045,0.076
 P049,District_49,Karnataka,2025_W14,54,54,0,0.032,0.093
 P050,District_50,Tamil Nadu,2025_W15,21,21,0,0.024,0.092
+
