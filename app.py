@@ -287,9 +287,21 @@ with tab3:
             st.warning("No valid 'year_week' values in predictions.csv.")
         else:
             # guard slider; use unique key
-            sel_idx = st.slider("Select prediction week", min_value=0, max_value=len(weeks_p)-1, value=len(weeks_p)-1, step=1, key="week_pred")
-            sel_week = weeks_p[sel_idx]
-            st.subheader(f"Predictions for {sel_week}")
+           # Guard slider creation if only one week available
+            if len(weeks_p) > 1:
+                sel_idx = st.slider(
+                    "Select prediction week",
+                    min_value=0,
+                    max_value=len(weeks_p) - 1,
+                    value=len(weeks_p) - 1,
+                    step=1,
+                    key="week_pred"
+                )
+                sel_week = weeks_p[sel_idx]
+            else:
+                sel_week = weeks_p[0]
+                st.info(f"Only one prediction week available: **{sel_week}**")
+                st.subheader(f"Predictions for {sel_week}")
 
             df_week = preds_df[preds_df['year_week'].astype(str) == sel_week].copy()
             if df_week.empty:
