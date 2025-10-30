@@ -63,7 +63,7 @@ def load_nodes(nodes_path="data/processed/nodes.csv"):
     return pd.DataFrame()
 
 @st.cache_data
-def load_predictions(path="outputs/predictions.csv"):
+def load_predictions(path="predictions.csv.csv"):
     if os.path.exists(path):
         p = pd.read_csv(path)
         p.columns = [c.strip() for c in p.columns]
